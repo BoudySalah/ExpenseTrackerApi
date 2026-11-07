@@ -2,16 +2,30 @@ using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.OpenApi.Models;
 using System.Security.Claims;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// 1. Database (EF Core + SQL Server)
-var connectionString = builder.Configuration.GetConnectionString("DefaultConnection")
-    ?? throw new InvalidOperationException("Connection string 'DefaultConnection' not found.");
+// 1. Database (prefer local in-memory DB for dev, or SQL Server when explicitly configured)
+var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
+var useInMemoryDb = builder.Configuration.GetValue<bool>("UseInMemoryDatabase", true);
 
 builder.Services.AddDbContext<AppDbContext>(options =>
-    options.UseSqlServer(connectionString));
+{
+    if (useInMemoryDb)
+    {
+        options.UseInMemoryDatabase("ExpenseTrackerDb");
+    }
+    else if (!string.IsNullOrWhiteSpace(connectionString))
+    {
+        options.UseSqlServer(connectionString);
+    }
+    else
+    {
+        throw new InvalidOperationException("Connection string 'DefaultConnection' not found and in-memory database is disabled.");
+    }
+});
 
 // 2. Identity API Endpoints (Bearer Token Authentication)
 builder.Services.AddAuthorization();
@@ -33,7 +47,50 @@ builder.Services.AddCors(options =>
 });
 
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+builder.Services.AddSwaggerGen(options =>
+{
+    options.SwaggerDoc("v1", new OpenApiInfo
+    {
+        Title = "Expense Tracker API",
+        Version = "v1",
+        Description = "API for managing personal expenses, budget summaries, and identity-based authentication.",
+        Contact = new OpenApiContact
+        {
+            Name = "Expense Tracker Team",
+            Email = "support@example.com"
+        },
+        License = new OpenApiLicense
+        {
+            Name = "MIT",
+            Url = new Uri("https://opensource.org/licenses/MIT")
+        }
+    });
+
+    options.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
+    {
+        Name = "Authorization",
+        Type = SecuritySchemeType.Http,
+        Scheme = "bearer",
+        BearerFormat = "JWT",
+        In = ParameterLocation.Header,
+        Description = "Enter 'Bearer' followed by a valid JWT token. Example: Bearer abc123..."
+    });
+
+    options.AddSecurityRequirement(new OpenApiSecurityRequirement
+    {
+        {
+            new OpenApiSecurityScheme
+            {
+                Reference = new OpenApiReference
+                {
+                    Type = ReferenceType.SecurityScheme,
+                    Id = "Bearer"
+                }
+            },
+            Array.Empty<string>()
+        }
+    });
+});
 
 var app = builder.Build();
 
@@ -58,14 +115,21 @@ app.UseExceptionHandler(errorApp =>
 });
 
 app.UseSwagger();
-app.UseSwaggerUI();
+app.UseSwaggerUI(c =>
+{
+    c.SwaggerEndpoint("/swagger/v1/swagger.json", "Expense Tracker API v1");
+    c.RoutePrefix = "swagger";
+    c.DocumentTitle = "Expense Tracker API";
+});
 app.UseHttpsRedirection();
 app.UseCors("AllowAll");
 app.UseAuthentication();
 app.UseAuthorization();
 
 // 6. Map Auth Endpoints (/register, /login, /refresh)
-app.MapIdentityApi<IdentityUser>().WithTags("Auth");
+app.MapIdentityApi<IdentityUser>()
+    .WithTags("Auth")
+    .WithSummary("Register, login, refresh, and manage identity endpoints for this API.");
 
 // Helper to get logged-in UserId
 static string? GetUserId(ClaimsPrincipal user) =>
@@ -102,7 +166,9 @@ app.MapPost("/expenses", async (CreateExpenseRequest req, ClaimsPrincipal user, 
     return Results.Created($"/expenses/{expense.Id}", expense.ToDto());
 })
 .RequireAuthorization()
-.WithTags("Expenses");
+.WithTags("Expenses")
+.WithSummary("Create a new expense for the authenticated user.")
+.WithDescription("Creates a personal expense record with amount, currency, category, optional note, and date.");
 
 // 8. GET /expenses?from=&to= — List user's expenses
 app.MapGet("/expenses", async (DateTime? from, DateTime? to, ClaimsPrincipal user, AppDbContext db) =>
@@ -125,7 +191,9 @@ app.MapGet("/expenses", async (DateTime? from, DateTime? to, ClaimsPrincipal use
     return Results.Ok(expenses);
 })
 .RequireAuthorization()
-.WithTags("Expenses");
+.WithTags("Expenses")
+.WithSummary("List all expenses for the authenticated user.")
+.WithDescription("Returns the user's expense list, optionally filtered by a date range using from and to query parameters.");
 
 // 9. DELETE /expenses/{id} — Delete an expense made by mistake
 app.MapDelete("/expenses/{id:guid}", async (Guid id, ClaimsPrincipal user, AppDbContext db) =>
@@ -143,7 +211,9 @@ app.MapDelete("/expenses/{id:guid}", async (Guid id, ClaimsPrincipal user, AppDb
     return Results.NoContent();
 })
 .RequireAuthorization()
-.WithTags("Expenses");
+.WithTags("Expenses")
+.WithSummary("Delete a single expense record.")
+.WithDescription("Deletes one expense owned by the authenticated user. Returns 404 if the expense does not exist or is not owned by the current user.");
 
 // 10. GET /summary?period=today|week|month&days=7&topCategories=3 — Flexible Summary Endpoint
 app.MapGet("/summary", async (
@@ -203,7 +273,9 @@ app.MapGet("/summary", async (
     ));
 })
 .RequireAuthorization()
-.WithTags("Summary");
+.WithTags("Summary")
+.WithSummary("Get a summary of spending for the current user.")
+.WithDescription("Returns totals and category breakdowns for a day, week, month, or a custom number of days.");
 
 // 11. POST /seed-demo — Populate 32 realistic EGP expenses
 app.MapPost("/seed-demo", async (ClaimsPrincipal user, AppDbContext db) =>
@@ -280,7 +352,9 @@ app.MapPost("/seed-demo", async (ClaimsPrincipal user, AppDbContext db) =>
     });
 })
 .RequireAuthorization()
-.WithTags("Demo Setup");
+.WithTags("Demo Setup")
+.WithSummary("Populate the authenticated user's store with demo expenses.")
+.WithDescription("Clears existing demo data for the current user and seeds realistic sample entries for testing reports and charts.");
 
 app.Run();
 
